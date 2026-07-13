@@ -11,11 +11,10 @@ marketplace. This workspace has three independent contracts:
 | `reputation` | `contracts/reputation` | Stores one immutable review per completed appointment and keeps a running rating aggregate per skilled worker. |
 | `loyalty-token` | `contracts/loyalty-token` | A SEP-41-style fungible token used to reward clients/workers with points on completed appointments. Only a designated `minter` (the backend's service account) can mint. |
 
-These mirror the domain already implemented server-side in
-[`guildworkman-api`](https://github.com/workman-labs/guildworkman-api)
-(`AppointmentService`, `ReviewService`, `TransactionService`), moving the
-trust-sensitive parts of that flow — holding money, recording reviews,
-issuing rewards — on-chain.
+These mirror the domain already implemented server-side in the backend
+([`../backend-api`](../backend-api): `AppointmentService`, `ReviewService`,
+`TransactionService`), moving the trust-sensitive parts of that flow —
+holding money, recording reviews, issuing rewards — on-chain.
 
 ## Table of contents
 
@@ -32,13 +31,12 @@ issuing rewards — on-chain.
 
 ## Project ecosystem
 
-GuildWorkman is split across three repositories:
+GuildWorkman lives in two repositories:
 
 | Repo | Role |
 |---|---|
-| **`guildworkman-contracts`** (this repo) | Soroban smart contracts for on-chain escrow, reputation, and loyalty rewards. |
+| **`guildworkman-core`** (this repo) | These Soroban contracts (`soroban-contracts/`, here) **and** the Spring Boot backend (`backend-api/`) — which implements the same domain server-side today (`AppointmentService`, `ReviewService`, `TransactionService`) and is the intended caller of these contracts once integrated (see [Suggested backend integration](#suggested-backend-integration-not-yet-wired-in)). |
 | [`guildworkman-web`](https://github.com/workman-labs/guildworkman-web) | Next.js frontend. Already has a real Freighter wallet-connect button and a "Trust, backed by smart contracts" section describing these contracts — but makes no contract calls yet. |
-| [`guildworkman-api`](https://github.com/workman-labs/guildworkman-api) | Spring Boot backend. Implements the same domain server-side today (`AppointmentService`, `ReviewService`, `TransactionService`) and is the intended caller of these contracts once integrated — see [Suggested backend integration](#suggested-backend-integration-not-yet-wired-in) below. |
 
 ## Architecture
 
@@ -57,8 +55,8 @@ These are three separate contracts rather than one monolith:
 
 ### Suggested backend integration (not yet wired in)
 
-None of this is currently called from `guildworkman-api`. The intended
-flow, if/when integrated, looks like:
+None of this is currently called from the backend (`../backend-api`). The
+intended flow, if/when integrated, looks like:
 
 1. Client books a worker in the existing Java backend → backend (or the
    client's wallet, if going non-custodial) calls `escrow.create_appointment`
@@ -74,7 +72,7 @@ flow, if/when integrated, looks like:
 
 This requires the backend to hold a Stellar keypair per role (or per user, if
 going non-custodial) and a Soroban RPC client — none of that exists in
-`guildworkman-api` today.
+`backend-api/` today.
 
 ## Prerequisites
 

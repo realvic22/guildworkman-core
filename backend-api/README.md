@@ -1,6 +1,6 @@
 # GuildWorkman API
 
-![Test](https://github.com/workman-labs/guildworkman-api/actions/workflows/test.yml/badge.svg)
+![Test](https://github.com/workman-labs/guildworkman-core/actions/workflows/test.yml/badge.svg)
 
 Spring Boot backend for **GuildWorkman**, a marketplace that connects clients
 with skilled workers (electricians, plumbers, barbers, beauticians,
@@ -36,13 +36,12 @@ appointments and consultations, with in-app payments and reviews.
 
 ## Project ecosystem
 
-GuildWorkman is split across three repositories:
+GuildWorkman lives in two repositories:
 
 | Repo | Role |
 |---|---|
-| **`guildworkman-api`** (this repo) | Spring Boot backend — auth, booking, payments, email, and the Postgres-backed domain model. |
+| **`guildworkman-core`** (this repo) | The Spring Boot backend (`backend-api/`, documented here) **and** the Soroban smart contracts (`soroban-contracts/`) — on-chain escrow, reputation, and loyalty rewards, designed to be called *from* this backend but not yet integrated (see [Not yet wired up](#not-yet-wired-up)). |
 | [`guildworkman-web`](https://github.com/workman-labs/guildworkman-web) | Next.js frontend that talks to this API over REST. |
-| [`guildworkman-contracts`](https://github.com/workman-labs/guildworkman-contracts) | Soroban (Stellar) smart contracts for on-chain escrow, reputation, and loyalty rewards — designed to be called *from* this backend, but not yet integrated (see [Not yet wired up](#not-yet-wired-up)). |
 
 ## Tech stack
 

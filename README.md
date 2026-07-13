@@ -26,5 +26,6 @@ so each stack only builds on its own changes:
 
 ## History
 
-This repo was formed by merging `guildworkman-contracts` into `guildworkman-api`
-with `git subtree` (both histories preserved). See [`MIGRATION.md`](MIGRATION.md).
+This repo (`guildworkman-core`) was formed by merging `guildworkman-contracts`
+into the `guildworkman-api` backend with `git subtree` (both histories
+preserved), then renamed to `guildworkman-core`. See [`MIGRATION.md`](MIGRATION.md).

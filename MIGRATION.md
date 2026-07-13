@@ -1,7 +1,7 @@
 # Migration: fold `guildworkman-contracts` into this repo (monorepo)
 
-Runbook for merging the Soroban smart-contracts repo into `guildworkman-api`,
-preserving both commit histories. **Do it on a fresh clone + feature branch;
+Runbook for merging the Soroban smart-contracts repo into `guildworkman-api`
+(the repo since renamed `guildworkman-core`), preserving both commit histories. **Do it on a fresh clone + feature branch;
 nothing is destructive; the contracts repo is archived (never deleted) only
 after the merge is verified.**
 
@@ -16,7 +16,7 @@ after the merge is verified.**
 
 | Decision | Choice |
 |---|---|
-| Base repo | `guildworkman-api` (keeps its history, 6 PRs, issues) |
+| Base repo | `guildworkman-api`, renamed to `guildworkman-core` (keeps its history, 6 PRs, issues) |
 | Absorbed repo | `guildworkman-contracts` (git@github.com:workman-labs/guildworkman-contracts.git, default branch `main`) |
 | Layout | **`backend-api/`** (Spring API) + **`soroban-contracts/`** (Soroban) |
 | Technique | **`git subtree`** (preserves original commit SHAs) + `git mv` for the symmetric relocation |
@@ -26,7 +26,7 @@ after the merge is verified.**
 ## Step 1 — Safe working copy + graft history
 
 ```bash
-git clone git@github.com:workman-labs/guildworkman-api.git gw-monorepo
+git clone git@github.com:workman-labs/guildworkman-core.git gw-monorepo
 cd gw-monorepo
 git checkout development
 git checkout -b chore/merge-contracts-monorepo
@@ -93,7 +93,7 @@ Review the diff (especially CI), then merge into `development`.
 ## Step 6 — Archive contracts (only after the merge is verified)
 
 - Optional: commit a notice on the contracts repo first — "Moved to
-  `guildworkman-api/soroban`."
+  `guildworkman-core/soroban-contracts`."
 - GitHub: **Settings -> Archive repository** (read-only; PRs + history kept).
 - Update any external links / deploy docs pointing at the old repo.
 
