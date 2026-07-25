@@ -58,6 +58,7 @@ public class SecurityConfig {
             "/api/v1/auth/logout",
             "/api/v1/client/**",
             "/api/v1/skilledWorker/**",
+            "/api/v1/chain/events/**",
             "/v3/api-docs/**",
             "/swagger-ui/**",
             "/swagger-ui.html"
