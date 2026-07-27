@@ -6,6 +6,7 @@ import com.guildworkman.api.chain.model.*;
 import com.guildworkman.api.chain.repository.*;
 import jakarta.transaction.Transactional;
 import lombok.RequiredArgsConstructor;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
@@ -18,11 +19,18 @@ public class ChainEventService {
     private final OnChainEventRepository events;
     private final OutboxEventRepository outbox;
     private final ObjectMapper objectMapper;
+    private final List<ChainEventHandler> handlers;
     private static final int MAX_ATTEMPTS = 5;
 
     @Transactional
     public ChainEventResponse ingest(IngestChainEventRequest request) {
-        return events.findByEventKey(request.eventKey()).map(ChainEventResponse::from).orElseGet(() -> {
+        return events.findByEventKey(request.eventKey())
+                .map(ChainEventResponse::from)
+                .orElseGet(() -> createEvent(request));
+    }
+
+    private ChainEventResponse createEvent(IngestChainEventRequest request) {
+        try {
             OnChainEvent event = new OnChainEvent();
             event.setEventKey(request.eventKey()); event.setContractId(request.contractId());
             event.setLedger(request.ledger()); event.setEventIndex(request.eventIndex());
@@ -33,17 +41,27 @@ public class ChainEventService {
             OnChainEvent saved = events.save(event);
             OutboxEvent message = new OutboxEvent(); message.setEventId(saved.getId()); outbox.save(message);
             return ChainEventResponse.from(saved);
-        });
+        } catch (DataIntegrityViolationException ex) {
+            return events.findByEventKey(request.eventKey())
+                    .map(ChainEventResponse::from)
+                    .orElseThrow(() -> new IllegalStateException("Event not found after idempotent-guard violation for key=" + request.eventKey(), ex));
+        } catch (RuntimeException ex) {
+            return events.findByEventKey(request.eventKey())
+                    .map(ChainEventResponse::from)
+                    .orElseThrow(() -> ex);
+        }
     }
 
     @Transactional
     public int replay(ReplayRequest request) {
         int count = 0;
-        for (OnChainEvent event : events.findByLedgerBetweenOrderByContractIdAscLedgerAscEventIndexAsc(request.fromLedger(), request.toLedger())) {
+        List<OnChainEvent> batch = events.findByLedgerBetweenOrderByContractIdAscLedgerAscEventIndexAsc(request.fromLedger(), request.toLedger());
+        for (OnChainEvent event : batch) {
             event.setStatus(ChainEventStatus.PENDING); event.setAttempts(0); event.setLastError(null); event.setProcessedAt(null); event.setNextAttemptAt(Instant.now());
             outbox.findByEventId(event.getId()).ifPresent(message -> { message.setStatus(OutboxStatus.PENDING); message.setAttempts(0); message.setLastError(null); message.setCompletedAt(null); message.setNextAttemptAt(Instant.now()); });
             count++;
         }
+        events.saveAll(batch);
         return count;
     }
 
@@ -53,11 +71,10 @@ public class ChainEventService {
         events.claimNext(EnumSet.of(ChainEventStatus.PENDING, ChainEventStatus.PROCESSING), Instant.now(), PageRequest.of(0, 1)).stream().findFirst().ifPresent(this::process);
     }
 
-    private void process(OnChainEvent event) {
+    void process(OnChainEvent event) {
         try {
             event.setStatus(ChainEventStatus.PROCESSING); event.setAttempts(event.getAttempts() + 1);
-            // The event row is the durable projection. Keeping the transition in
-            // the same transaction as the outbox acknowledgement makes retries safe.
+            for (ChainEventHandler handler : handlers) handler.handle(event);
             event.setStatus(ChainEventStatus.PROCESSED); event.setProcessedAt(Instant.now()); event.setLastError(null);
             outbox.findByEventId(event.getId()).ifPresent(message -> { message.setStatus(OutboxStatus.COMPLETED); message.setCompletedAt(Instant.now()); message.setLastError(null); });
         } catch (RuntimeException ex) {
