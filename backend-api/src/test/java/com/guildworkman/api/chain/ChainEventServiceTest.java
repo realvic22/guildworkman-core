@@ -1,15 +1,17 @@
 package com.guildworkman.api.chain;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.guildworkman.api.chain.api.IngestChainEventRequest;
+import com.guildworkman.api.chain.api.ReplayRequest;
 import com.guildworkman.api.chain.model.ChainEventStatus;
 import com.guildworkman.api.chain.model.OnChainEvent;
+import com.guildworkman.api.chain.model.OutboxEvent;
+import com.guildworkman.api.chain.model.OutboxStatus;
 import com.guildworkman.api.chain.repository.OnChainEventRepository;
 import com.guildworkman.api.chain.repository.OutboxEventRepository;
+import com.guildworkman.api.chain.service.ChainEventInserter;
 import com.guildworkman.api.chain.service.ChainEventService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.mockito.Mockito;
 import org.springframework.dao.DataIntegrityViolationException;
 
 import java.util.List;
@@ -24,15 +26,15 @@ class ChainEventServiceTest {
 
     private OnChainEventRepository events;
     private OutboxEventRepository outbox;
-    private ChainEventService.ChainEventInserter inserter;
+    private ChainEventInserter inserter;
     private ChainEventService service;
 
     @BeforeEach
     void setUp() {
         events = mock(OnChainEventRepository.class);
         outbox = mock(OutboxEventRepository.class);
-        inserter = mock(ChainEventService.ChainEventInserter.class);
-        service = new ChainEventService(events, outbox, new ObjectMapper(), List.of(), inserter);
+        inserter = mock(ChainEventInserter.class);
+        service = new ChainEventService(events, outbox, List.of(), inserter);
     }
 
     @Test
@@ -73,7 +75,6 @@ class ChainEventServiceTest {
     @Test
     void ingestHandlesDataIntegrityViolationWithFallbackLookup() {
         var request = new IngestChainEventRequest("race", "CABC", 10, 0, List.of("T"), "{}");
-        when(events.findByEventKey("race")).thenReturn(Optional.empty());
         when(inserter.insert(request)).thenThrow(new DataIntegrityViolationException("dup key"));
 
         var afterSave = new OnChainEvent();
@@ -112,22 +113,22 @@ class ChainEventServiceTest {
         event.setProcessedAt(java.time.Instant.now());
         event.setLedger(10);
 
-        var message = new com.guildworkman.api.chain.model.OutboxEvent();
+        var message = new OutboxEvent();
         message.setId(9L);
         message.setEventId(1L);
-        message.setStatus(com.guildworkman.api.chain.model.OutboxStatus.COMPLETED);
+        message.setStatus(OutboxStatus.COMPLETED);
 
         when(events.findByLedgerBetweenOrderByContractIdAscLedgerAscEventIndexAsc(5, 15))
                 .thenReturn(List.of(event));
         when(outbox.findByEventId(1L)).thenReturn(Optional.of(message));
 
-        int count = service.replay(new com.guildworkman.api.chain.api.ReplayRequest(5, 15));
+        int count = service.replay(new ReplayRequest(5, 15));
 
         assertThat(count).isEqualTo(1);
         verify(events).save(event);
         verify(outbox).save(message);
         assertThat(event.getStatus()).isEqualTo(ChainEventStatus.PENDING);
         assertThat(event.getAttempts()).isZero();
-        assertThat(message.getStatus()).isEqualTo(com.guildworkman.api.chain.model.OutboxStatus.PENDING);
+        assertThat(message.getStatus()).isEqualTo(OutboxStatus.PENDING);
     }
 }

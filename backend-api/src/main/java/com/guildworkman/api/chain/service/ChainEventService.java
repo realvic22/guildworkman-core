@@ -1,6 +1,5 @@
 package com.guildworkman.api.chain.service;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.guildworkman.api.chain.api.*;
 import com.guildworkman.api.chain.model.*;
 import com.guildworkman.api.chain.repository.*;
@@ -9,7 +8,6 @@ import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
@@ -21,7 +19,6 @@ import java.util.List;
 public class ChainEventService {
     private final OnChainEventRepository events;
     private final OutboxEventRepository outbox;
-    private final ObjectMapper objectMapper;
     private final List<ChainEventHandler> handlers;
     private final ChainEventInserter inserter;
 
@@ -109,40 +106,6 @@ public class ChainEventService {
                 event.setNextAttemptAt(Instant.now().plusSeconds(1L << Math.min(event.getAttempts(), 6)));
             }
             events.save(event);
-        }
-    }
-
-    /**
-     * Isolated insert so a unique-key race aborts only this nested transaction
-     * (Postgres), leaving the caller's transaction able to re-read the winner.
-     */
-    @Service
-    @RequiredArgsConstructor
-    static class ChainEventInserter {
-        private final OnChainEventRepository events;
-        private final OutboxEventRepository outbox;
-        private final ObjectMapper objectMapper;
-
-        @Transactional(propagation = Propagation.REQUIRES_NEW)
-        public OnChainEvent insert(IngestChainEventRequest request) {
-            OnChainEvent event = new OnChainEvent();
-            event.setEventKey(request.eventKey());
-            event.setContractId(request.contractId());
-            event.setLedger(request.ledger());
-            event.setEventIndex(request.eventIndex());
-            try {
-                event.setTopics(objectMapper.writeValueAsString(request.topics()));
-            } catch (Exception ex) {
-                throw new IllegalArgumentException("topics must be serializable", ex);
-            }
-            event.setPayload(request.payload());
-            event.setStatus(ChainEventStatus.PENDING);
-            event.setNextAttemptAt(Instant.now());
-            OnChainEvent saved = events.saveAndFlush(event);
-            OutboxEvent message = new OutboxEvent();
-            message.setEventId(saved.getId());
-            outbox.saveAndFlush(message);
-            return saved;
         }
     }
 }
