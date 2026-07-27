@@ -17,17 +17,25 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.mock.mockito.MockBean;
 
+import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.UUID;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.reset;
 
-@SpringBootTest(properties = { "chain.events.poll-delay-ms=60000" })
+@SpringBootTest(properties = {
+        "chain.events.poll-delay-ms=3600000",
+        "spring.task.scheduling.enabled=false"
+})
 class ChainEventServiceIntegrationTest {
 
     @Autowired
@@ -44,8 +52,13 @@ class ChainEventServiceIntegrationTest {
 
     @BeforeEach
     void cleanSlate() {
+        reset(chainEventHandler);
         outbox.deleteAll();
         events.deleteAll();
+    }
+
+    private static String key(String prefix) {
+        return prefix + "-" + UUID.randomUUID();
     }
 
     private OnChainEvent saveEvent(String eventKey, ChainEventStatus status, int attempts) {
@@ -58,24 +71,21 @@ class ChainEventServiceIntegrationTest {
         e.setPayload("{\"x\":1}");
         e.setStatus(status);
         e.setAttempts(attempts);
-        e.setNextAttemptAt(java.time.Instant.now());
-        return events.save(e);
+        e.setNextAttemptAt(Instant.now().minusSeconds(1));
+        return events.saveAndFlush(e);
     }
 
     private OutboxEvent saveOutbox(Long eventId, OutboxStatus status) {
         OutboxEvent o = new OutboxEvent();
         o.setEventId(eventId);
         o.setStatus(status);
-        return outbox.save(o);
+        o.setNextAttemptAt(Instant.now().minusSeconds(1));
+        return outbox.saveAndFlush(o);
     }
-
-    // -------------------------------------------------------------------------
-    // 1. Transactional outbox: ingest creates both rows atomically
-    // -------------------------------------------------------------------------
 
     @Test
     void ingestCreatesBothEventAndOutboxRow() {
-        IngestChainEventRequest req = new IngestChainEventRequest("k1", "C001", 1, 0, List.of("T"), "{}");
+        IngestChainEventRequest req = new IngestChainEventRequest(key("k1"), "C001", 1, 0, List.of("T"), "{}");
         ChainEventResponse resp = service.ingest(req);
 
         OnChainEvent saved = events.findById(resp.id()).orElseThrow();
@@ -86,13 +96,10 @@ class ChainEventServiceIntegrationTest {
         assertThat(msg.getEventId()).isEqualTo(saved.getId());
     }
 
-    // -------------------------------------------------------------------------
-    // 2. Ingest idempotency
-    // -------------------------------------------------------------------------
-
     @Test
     void ingestIsIdempotentForDuplicateEventKey() {
-        IngestChainEventRequest req = new IngestChainEventRequest("dup", "C002", 2, 0, List.of("T"), "{}");
+        String eventKey = key("dup");
+        IngestChainEventRequest req = new IngestChainEventRequest(eventKey, "C002", 2, 0, List.of("T"), "{}");
         ChainEventResponse first = service.ingest(req);
         ChainEventResponse second = service.ingest(req);
 
@@ -101,13 +108,9 @@ class ChainEventServiceIntegrationTest {
         assertThat(outbox.count()).isEqualTo(1);
     }
 
-    // -------------------------------------------------------------------------
-    // 3. Happy-path processing
-    // -------------------------------------------------------------------------
-
     @Test
     void processOneTransitionsEventToProcessedAndOutboxToCompleted() {
-        OnChainEvent event = saveEvent("happy", ChainEventStatus.PENDING, 0);
+        OnChainEvent event = saveEvent(key("happy"), ChainEventStatus.PENDING, 0);
         saveOutbox(event.getId(), OutboxStatus.PENDING);
 
         service.processOne();
@@ -122,16 +125,12 @@ class ChainEventServiceIntegrationTest {
         assertThat(msg.getCompletedAt()).isNotNull();
     }
 
-    // -------------------------------------------------------------------------
-    // 4. Failure path: handler exception -> DEAD_LETTER after MAX_ATTEMPTS
-    // -------------------------------------------------------------------------
-
     @Test
     void failureExhaustingRetriesMovesToDeadLetter() {
-        // Seed at attempts=4 so one more failure reaches MAX_ATTEMPTS (5).
-        // Backoff after earlier failures would otherwise push nextAttemptAt into
-        // the future and prevent claimNext from picking the event up again.
-        OnChainEvent event = saveEvent("dead", ChainEventStatus.PENDING, 4);
+        // Seed attempts=4 so one failure increments to 5 (== MAX_ATTEMPTS) → DEAD_LETTER.
+        // Do not loop processOne(): backoff after a failure makes nextAttemptAt future,
+        // so claimNext will not pick the event up again until that time.
+        OnChainEvent event = saveEvent(key("dead"), ChainEventStatus.PENDING, 4);
         saveOutbox(event.getId(), OutboxStatus.PENDING);
 
         doThrow(new RuntimeException("simulated processing failure"))
@@ -145,43 +144,33 @@ class ChainEventServiceIntegrationTest {
         assertThat(reloaded.getLastError()).isEqualTo("simulated processing failure");
     }
 
-    // -------------------------------------------------------------------------
-    // 5. Backoff after failure
-    // -------------------------------------------------------------------------
-
     @Test
     void failureAppliesExponentialBackoff() {
-        OnChainEvent event = saveEvent("backoff", ChainEventStatus.PENDING, 0);
+        OnChainEvent event = saveEvent(key("backoff"), ChainEventStatus.PENDING, 0);
         saveOutbox(event.getId(), OutboxStatus.PENDING);
+        Instant before = Instant.now();
 
         doThrow(new RuntimeException("transient error"))
                 .when(chainEventHandler).handle(any());
 
-        try {
-            service.processOne();
-        } catch (RuntimeException ignored) {
-        }
+        service.processOne();
 
         OnChainEvent reloaded = events.findById(event.getId()).orElseThrow();
         assertThat(reloaded.getStatus()).isEqualTo(ChainEventStatus.PENDING);
         assertThat(reloaded.getAttempts()).isEqualTo(1);
-        assertThat(reloaded.getNextAttemptAt()).isAfter(java.time.Instant.now());
+        // attempts=1 → delay = 1<<1 = 2s
+        assertThat(reloaded.getNextAttemptAt()).isAfter(before.plusSeconds(1));
     }
-
-    // -------------------------------------------------------------------------
-    // 6. Replay persists changes
-    // -------------------------------------------------------------------------
 
     @Test
     void replayResetsEventAndOutboxStateAndPersists() {
-        OnChainEvent event = saveEvent("replay-me", ChainEventStatus.PROCESSED, 3);
+        OnChainEvent event = saveEvent(key("replay"), ChainEventStatus.PROCESSED, 3);
         event.setLastError("some error");
-        events.save(event);
+        event.setProcessedAt(Instant.now());
+        events.saveAndFlush(event);
         saveOutbox(event.getId(), OutboxStatus.COMPLETED);
 
-        ReplayRequest req = new ReplayRequest(100, 100);
-        int count = service.replay(req);
-
+        int count = service.replay(new ReplayRequest(100, 100));
         assertThat(count).isEqualTo(1);
 
         OnChainEvent reloaded = events.findById(event.getId()).orElseThrow();
@@ -197,13 +186,11 @@ class ChainEventServiceIntegrationTest {
         assertThat(msg.getCompletedAt()).isNull();
     }
 
-    // -------------------------------------------------------------------------
-    // 7. Replayed events can be reprocessed
-    // -------------------------------------------------------------------------
-
     @Test
     void replayedEventsCanBeReprocessed() {
-        OnChainEvent event = saveEvent("reprocess-me", ChainEventStatus.PROCESSED, 5);
+        OnChainEvent event = saveEvent(key("reprocess"), ChainEventStatus.PROCESSED, 5);
+        event.setProcessedAt(Instant.now());
+        events.saveAndFlush(event);
         saveOutbox(event.getId(), OutboxStatus.COMPLETED);
 
         service.replay(new ReplayRequest(100, 100));
@@ -215,50 +202,44 @@ class ChainEventServiceIntegrationTest {
         assertThat(reloaded.getProcessedAt()).isNotNull();
     }
 
-    // -------------------------------------------------------------------------
-    // 8. Concurrency: pessimistic locking prevents duplicate processing
-    // -------------------------------------------------------------------------
-
     @Test
     void pessimisticLockingPreventsDuplicateProcessing() throws Exception {
-        OnChainEvent event = saveEvent("concurrent", ChainEventStatus.PENDING, 0);
+        OnChainEvent event = saveEvent(key("concurrent"), ChainEventStatus.PENDING, 0);
         saveOutbox(event.getId(), OutboxStatus.PENDING);
 
         int threads = 8;
         ExecutorService pool = Executors.newFixedThreadPool(threads);
+        List<Callable<Void>> tasks = new ArrayList<>();
+        for (int i = 0; i < threads; i++) {
+            tasks.add(() -> {
+                service.processOne();
+                return null;
+            });
+        }
 
-        List<Callable<Void>> tasks = java.util.stream.IntStream.range(0, threads)
-                .mapToObj(i -> (Callable<Void>) () -> { service.processOne(); return null; })
-                .toList();
-
-        for (Future<Void> f : pool.invokeAll(tasks)) {
-            f.get();
+        List<Future<Void>> futures = pool.invokeAll(tasks, 30, TimeUnit.SECONDS);
+        for (Future<Void> f : futures) {
+            f.get(5, TimeUnit.SECONDS);
         }
         pool.shutdown();
+        assertThat(pool.awaitTermination(10, TimeUnit.SECONDS)).isTrue();
 
         OnChainEvent reloaded = events.findById(event.getId()).orElseThrow();
         assertThat(reloaded.getStatus()).isEqualTo(ChainEventStatus.PROCESSED);
         assertThat(reloaded.getAttempts()).isEqualTo(1);
+        assertThat(events.countByStatus(ChainEventStatus.PROCESSED)).isEqualTo(1);
     }
-
-    // -------------------------------------------------------------------------
-    // 9. Processed events are not claimed again
-    // -------------------------------------------------------------------------
 
     @Test
     void alreadyProcessedEventsAreNotClaimedAgain() {
-        OnChainEvent event = saveEvent("claimed", ChainEventStatus.PENDING, 0);
+        OnChainEvent event = saveEvent(key("claimed"), ChainEventStatus.PENDING, 0);
         saveOutbox(event.getId(), OutboxStatus.PENDING);
 
+        service.processOne();
         service.processOne();
 
         OnChainEvent reloaded = events.findById(event.getId()).orElseThrow();
         assertThat(reloaded.getStatus()).isEqualTo(ChainEventStatus.PROCESSED);
-        assertThat(reloaded.getAttempts()).isEqualTo(1);
-
-        service.processOne();
-
-        reloaded = events.findById(event.getId()).orElseThrow();
         assertThat(reloaded.getAttempts()).isEqualTo(1);
     }
 }

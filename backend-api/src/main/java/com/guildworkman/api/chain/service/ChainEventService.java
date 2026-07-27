@@ -4,82 +4,145 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.guildworkman.api.chain.api.*;
 import com.guildworkman.api.chain.model.*;
 import com.guildworkman.api.chain.repository.*;
-import jakarta.transaction.Transactional;
 import lombok.RequiredArgsConstructor;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Propagation;
+import org.springframework.transaction.annotation.Transactional;
 
-import java.time.*;
-import java.util.*;
+import java.time.Instant;
+import java.util.EnumSet;
+import java.util.List;
 
-@Service @RequiredArgsConstructor
+@Service
+@RequiredArgsConstructor
 public class ChainEventService {
     private final OnChainEventRepository events;
     private final OutboxEventRepository outbox;
     private final ObjectMapper objectMapper;
     private final List<ChainEventHandler> handlers;
-    private static final int MAX_ATTEMPTS = 5;
+    private final ChainEventInserter inserter;
 
-    @Transactional
+    static final int MAX_ATTEMPTS = 5;
+
+    @Transactional(readOnly = true)
     public ChainEventResponse ingest(IngestChainEventRequest request) {
         return events.findByEventKey(request.eventKey())
                 .map(ChainEventResponse::from)
-                .orElseGet(() -> createEvent(request));
+                .orElseGet(() -> insertIdempotently(request));
     }
 
-    private ChainEventResponse createEvent(IngestChainEventRequest request) {
+    private ChainEventResponse insertIdempotently(IngestChainEventRequest request) {
         try {
-            OnChainEvent event = new OnChainEvent();
-            event.setEventKey(request.eventKey()); event.setContractId(request.contractId());
-            event.setLedger(request.ledger()); event.setEventIndex(request.eventIndex());
-            try { event.setTopics(objectMapper.writeValueAsString(request.topics())); }
-            catch (Exception ex) { throw new IllegalArgumentException("topics must be serializable", ex); }
-            event.setPayload(request.payload()); event.setStatus(ChainEventStatus.PENDING);
-            event.setNextAttemptAt(Instant.now());
-            OnChainEvent saved = events.save(event);
-            OutboxEvent message = new OutboxEvent(); message.setEventId(saved.getId()); outbox.save(message);
-            return ChainEventResponse.from(saved);
+            return ChainEventResponse.from(inserter.insert(request));
         } catch (DataIntegrityViolationException ex) {
+            // Nested REQUIRES_NEW insert rolled back; outer TX can still read the winner.
             return events.findByEventKey(request.eventKey())
                     .map(ChainEventResponse::from)
-                    .orElseThrow(() -> new IllegalStateException("Event not found after idempotent-guard violation for key=" + request.eventKey(), ex));
-        } catch (RuntimeException ex) {
-            return events.findByEventKey(request.eventKey())
-                    .map(ChainEventResponse::from)
-                    .orElseThrow(() -> ex);
+                    .orElseThrow(() -> new IllegalStateException(
+                            "Event not found after idempotent-guard violation for key=" + request.eventKey(), ex));
         }
     }
 
     @Transactional
     public int replay(ReplayRequest request) {
         int count = 0;
-        List<OnChainEvent> batch = events.findByLedgerBetweenOrderByContractIdAscLedgerAscEventIndexAsc(request.fromLedger(), request.toLedger());
+        List<OnChainEvent> batch = events.findByLedgerBetweenOrderByContractIdAscLedgerAscEventIndexAsc(
+                request.fromLedger(), request.toLedger());
+        Instant now = Instant.now();
         for (OnChainEvent event : batch) {
-            event.setStatus(ChainEventStatus.PENDING); event.setAttempts(0); event.setLastError(null); event.setProcessedAt(null); event.setNextAttemptAt(Instant.now());
-            outbox.findByEventId(event.getId()).ifPresent(message -> { message.setStatus(OutboxStatus.PENDING); message.setAttempts(0); message.setLastError(null); message.setCompletedAt(null); message.setNextAttemptAt(Instant.now()); });
+            event.setStatus(ChainEventStatus.PENDING);
+            event.setAttempts(0);
+            event.setLastError(null);
+            event.setProcessedAt(null);
+            event.setNextAttemptAt(now);
+            events.save(event);
+
+            outbox.findByEventId(event.getId()).ifPresent(message -> {
+                message.setStatus(OutboxStatus.PENDING);
+                message.setAttempts(0);
+                message.setLastError(null);
+                message.setCompletedAt(null);
+                message.setNextAttemptAt(now);
+                outbox.save(message);
+            });
             count++;
         }
-        events.saveAll(batch);
         return count;
     }
 
     @Scheduled(fixedDelayString = "${chain.events.poll-delay-ms:1000}")
     @Transactional
     public void processOne() {
-        events.claimNext(EnumSet.of(ChainEventStatus.PENDING, ChainEventStatus.PROCESSING), Instant.now(), PageRequest.of(0, 1)).stream().findFirst().ifPresent(this::process);
+        events.claimNext(
+                EnumSet.of(ChainEventStatus.PENDING, ChainEventStatus.PROCESSING),
+                Instant.now(),
+                PageRequest.of(0, 1)
+        ).stream().findFirst().ifPresent(this::process);
     }
 
     void process(OnChainEvent event) {
         try {
-            event.setStatus(ChainEventStatus.PROCESSING); event.setAttempts(event.getAttempts() + 1);
-            for (ChainEventHandler handler : handlers) handler.handle(event);
-            event.setStatus(ChainEventStatus.PROCESSED); event.setProcessedAt(Instant.now()); event.setLastError(null);
-            outbox.findByEventId(event.getId()).ifPresent(message -> { message.setStatus(OutboxStatus.COMPLETED); message.setCompletedAt(Instant.now()); message.setLastError(null); });
+            event.setStatus(ChainEventStatus.PROCESSING);
+            event.setAttempts(event.getAttempts() + 1);
+            for (ChainEventHandler handler : handlers) {
+                handler.handle(event);
+            }
+            event.setStatus(ChainEventStatus.PROCESSED);
+            event.setProcessedAt(Instant.now());
+            event.setLastError(null);
+            events.save(event);
+            outbox.findByEventId(event.getId()).ifPresent(message -> {
+                message.setStatus(OutboxStatus.COMPLETED);
+                message.setCompletedAt(Instant.now());
+                message.setLastError(null);
+                outbox.save(message);
+            });
         } catch (RuntimeException ex) {
             event.setLastError(ex.getMessage());
-            if (event.getAttempts() >= MAX_ATTEMPTS) event.setStatus(ChainEventStatus.DEAD_LETTER); else { event.setStatus(ChainEventStatus.PENDING); event.setNextAttemptAt(Instant.now().plusSeconds(1L << Math.min(event.getAttempts(), 6))); }
+            if (event.getAttempts() >= MAX_ATTEMPTS) {
+                event.setStatus(ChainEventStatus.DEAD_LETTER);
+            } else {
+                event.setStatus(ChainEventStatus.PENDING);
+                event.setNextAttemptAt(Instant.now().plusSeconds(1L << Math.min(event.getAttempts(), 6)));
+            }
+            events.save(event);
+        }
+    }
+
+    /**
+     * Isolated insert so a unique-key race aborts only this nested transaction
+     * (Postgres), leaving the caller's transaction able to re-read the winner.
+     */
+    @Service
+    @RequiredArgsConstructor
+    static class ChainEventInserter {
+        private final OnChainEventRepository events;
+        private final OutboxEventRepository outbox;
+        private final ObjectMapper objectMapper;
+
+        @Transactional(propagation = Propagation.REQUIRES_NEW)
+        public OnChainEvent insert(IngestChainEventRequest request) {
+            OnChainEvent event = new OnChainEvent();
+            event.setEventKey(request.eventKey());
+            event.setContractId(request.contractId());
+            event.setLedger(request.ledger());
+            event.setEventIndex(request.eventIndex());
+            try {
+                event.setTopics(objectMapper.writeValueAsString(request.topics()));
+            } catch (Exception ex) {
+                throw new IllegalArgumentException("topics must be serializable", ex);
+            }
+            event.setPayload(request.payload());
+            event.setStatus(ChainEventStatus.PENDING);
+            event.setNextAttemptAt(Instant.now());
+            OnChainEvent saved = events.saveAndFlush(event);
+            OutboxEvent message = new OutboxEvent();
+            message.setEventId(saved.getId());
+            outbox.saveAndFlush(message);
+            return saved;
         }
     }
 }
