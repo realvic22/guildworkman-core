@@ -24,7 +24,7 @@ class ChainEventServiceTest {
     void ingestIsIdempotentForTheSameEventKey() {
         var events = Mockito.mock(OnChainEventRepository.class);
         var outbox = Mockito.mock(OutboxEventRepository.class);
-        var service = new ChainEventService(events, outbox, new ObjectMapper());
+        var service = new ChainEventService(events, outbox, new ObjectMapper(), List.of());
         var request = new IngestChainEventRequest("evt-1", "CABC", 10, 0, List.of("Transfer"), "{\"amount\":1}");
         when(events.findByEventKey("evt-1")).thenReturn(Optional.empty());
         var event = new OnChainEvent();
@@ -44,7 +44,7 @@ class ChainEventServiceTest {
     void ingestReturnsExistingEventOnDuplicateEventKey() {
         var events = Mockito.mock(OnChainEventRepository.class);
         var outbox = Mockito.mock(OutboxEventRepository.class);
-        var service = new ChainEventService(events, outbox, new ObjectMapper());
+        var service = new ChainEventService(events, outbox, new ObjectMapper(), List.of());
         var request = new IngestChainEventRequest("evt-dup", "CABC", 10, 0, List.of("Transfer"), "{}");
         var existing = new OnChainEvent();
         existing.setId(1L);
@@ -64,7 +64,7 @@ class ChainEventServiceTest {
     void ingestHandlesDataIntegrityViolationWithFallbackLookup() {
         var events = Mockito.mock(OnChainEventRepository.class);
         var outbox = Mockito.mock(OutboxEventRepository.class);
-        var service = new ChainEventService(events, outbox, new ObjectMapper());
+        var service = new ChainEventService(events, outbox, new ObjectMapper(), List.of());
         var request = new IngestChainEventRequest("race", "CABC", 10, 0, List.of("T"), "{}");
 
         when(events.findByEventKey("race")).thenReturn(Optional.empty());
@@ -90,7 +90,7 @@ class ChainEventServiceTest {
     void ingestPropagatesUnexpectedExceptionWhenNoEventFound() {
         var events = Mockito.mock(OnChainEventRepository.class);
         var outbox = Mockito.mock(OutboxEventRepository.class);
-        var service = new ChainEventService(events, outbox, new ObjectMapper());
+        var service = new ChainEventService(events, outbox, new ObjectMapper(), List.of());
         var request = new IngestChainEventRequest("boom", "CABC", 10, 0, List.of("T"), "{}");
 
         when(events.findByEventKey("boom")).thenReturn(Optional.empty());
@@ -105,7 +105,7 @@ class ChainEventServiceTest {
     void replayPersistsChangesExplicitly() {
         var events = Mockito.mock(OnChainEventRepository.class);
         var outbox = Mockito.mock(OutboxEventRepository.class);
-        var service = new ChainEventService(events, outbox, new ObjectMapper());
+        var service = new ChainEventService(events, outbox, new ObjectMapper(), List.of());
 
         var event = new OnChainEvent();
         event.setId(1L);
