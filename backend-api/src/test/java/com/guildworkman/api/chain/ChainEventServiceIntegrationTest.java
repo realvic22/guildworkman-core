@@ -128,18 +128,16 @@ class ChainEventServiceIntegrationTest {
 
     @Test
     void failureExhaustingRetriesMovesToDeadLetter() {
-        OnChainEvent event = saveEvent("dead", ChainEventStatus.PENDING, 0);
+        // Seed at attempts=4 so one more failure reaches MAX_ATTEMPTS (5).
+        // Backoff after earlier failures would otherwise push nextAttemptAt into
+        // the future and prevent claimNext from picking the event up again.
+        OnChainEvent event = saveEvent("dead", ChainEventStatus.PENDING, 4);
         saveOutbox(event.getId(), OutboxStatus.PENDING);
 
         doThrow(new RuntimeException("simulated processing failure"))
                 .when(chainEventHandler).handle(any());
 
-        for (int i = 0; i < 5; i++) {
-            try {
-                service.processOne();
-            } catch (RuntimeException ignored) {
-            }
-        }
+        service.processOne();
 
         OnChainEvent reloaded = events.findById(event.getId()).orElseThrow();
         assertThat(reloaded.getStatus()).isEqualTo(ChainEventStatus.DEAD_LETTER);
